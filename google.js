@@ -1,39 +1,3 @@
-const { GoogleSpreadsheet } = require('google-spreadsheet');
-const SHEET_NAME = 'Email Tracking Log';
-
-// ✅ Utility to decode web-safe base64 (Google-style)
-function decodeBase64UrlSafe(str) {
-  str = str.replace(/-/g, '+').replace(/_/g, '/');
-  while (str.length % 4 !== 0) str += '=';
-  const buffer = Buffer.from(str, 'base64');
-  return buffer.toString('utf-8');
-}
-
-// Function to safely get credentials
-function getServiceAccountCreds() {
-  try {
-    if (!process.env.GOOGLE_SERVICE_ACCOUNT) {
-      console.error('❌ GOOGLE_SERVICE_ACCOUNT environment variable is missing');
-      return null;
-    }
-    return JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
-  } catch (err) {
-    console.error('❌ Error parsing GOOGLE_SERVICE_ACCOUNT:', err.message);
-    console.error('First 100 chars of GOOGLE_SERVICE_ACCOUNT:', 
-      process.env.GOOGLE_SERVICE_ACCOUNT ? process.env.GOOGLE_SERVICE_ACCOUNT.substring(0, 100) + '...' : 'undefined');
-    return null;
-  }
-}
-
-// Function to get sheet ID
-function getSheetId() {
-  const sheetId = process.env.GOOGLE_SHEET_ID;
-  if (!sheetId) {
-    console.error('❌ GOOGLE_SHEET_ID environment variable is missing');
-  }
-  return sheetId;
-}
-
 // 🔍 Log email open event by CID
 async function logOpenByCid(encodedCid) {
   try {
@@ -129,139 +93,49 @@ async function logOpenByCid(encodedCid) {
     console.log(`✅ Loaded ${rows.length} rows from sheet`);
 
     const trimmedCid = encodedCid.trim();
-    const target = rows.find(r => (r['CID'] || '').trim() === trimmedCid);
+    
+    // First, try to find exact CID match
+    let target = rows.find(r => (r['CID'] || '').trim() === trimmedCid);
+    
+    // If exact match fails, try matching by company, email, subject, and type
+    if (!target) {
+      console.log('⚠️ Exact CID match not found, trying to match by email details');
+      target = rows.find(r => 
+        r['Company Name'] === company && 
+        r['Email ID'] === email && 
+        r['Subject'] === subject &&
+        r['Email Type'] === type
+      );
+    }
 
     if (!target) {
-      console.error('❌ CID not found in sheet:', trimmedCid);
-      console.log('🔍 First few CIDs in sheet for comparison:');
-      if (rows.length > 0) {
-        for (let i = 0; i < Math.min(5, rows.length); i++) {
-          console.log(`CID ${i+1}:`, (rows[i]['CID'] || '').trim());
-        }
-      }
+      console.error('❌ Could not find matching row for tracking');
+      console.log('Details:', { company, email, subject, type });
+      return;
+    }
+
+    console.log('✅ Found matching row in sheet');
+    
+    // Prevent duplicate tracking within short time periods (5 seconds)
+    const lastSeenTime = target['Last Seen Time'];
+    if (lastSeenTime) {
+      const lastSeen = new Date(lastSeenTime);
+      const now = new Date();
+      const timeDiff = Math.abs(now - lastSeen);
       
-      // Attempt to create a new row if the CID doesn't exist
-      try {
-        console.log('⚠️ Attempting to create a new tracking row for the missing CID');
-        await insertTrackingRow(company, email, subject, type, new Date(parseInt(sentTime)), trimmedCid);
-        
-        // Retry finding the row
-        const updatedRows = await sheet.getRows();
-        const newTarget = updatedRows.find(r => (r['CID'] || '').trim() === trimmedCid);
-        
-        if (newTarget) {
-          console.log('✅ Successfully created and found new tracking row');
-          updateOpenStats(newTarget, now);
-          await newTarget.save();
-          return;
-        } else {
-          console.error('❌ Failed to create new tracking row');
-          return;
-        }
-      } catch (err) {
-        console.error('❌ Error creating new row:', err.message);
+      // If last seen was less than 5 seconds ago, likely a duplicate
+      if (timeDiff < 5000) {
+        console.log('⚠️ Ignoring probable duplicate open (within 5 seconds)');
         return;
       }
     }
-
-    console.log('✅ Found matching CID in sheet');
-    updateOpenStats(target, now);
+    
+    // Update the tracking data
+    updateOpenStats(target, now.toLocaleString('en-GB', { timeZone: 'Asia/Kolkata' }));
     await target.save();
-    console.log(`✅ Open logged for CID: ${encodedCid}`);
+    console.log(`✅ Open logged successfully for: ${company}, ${email}, ${subject}`);
   } catch (err) {
     console.error('❌ Error in logOpenByCid:', err.message);
     console.error(err.stack);
   }
 }
-
-// Helper function to update open statistics
-function updateOpenStats(row, timestamp) {
-  const total = parseInt(row['Total Opens'] || '0') || 0;
-  row['Total Opens'] = total + 1;
-  row['Last Seen Time'] = timestamp;
-
-  for (let i = 1; i <= 10; i++) {
-    const col = `Seen ${i}`;
-    if (!row[col]) {
-      row[col] = timestamp;
-      break;
-    }
-    if (i === 10) {
-      row[col] = timestamp;
-    }
-  }
-}
-
-// 📝 Insert a new tracking row when email is sent
-async function insertTrackingRow(company, email, subject, type, sentTime, cid) {
-  try {
-    console.log('📝 Starting insertTrackingRow for:', { company, email, subject, type });
-    
-    // Validate environment variables
-    const creds = getServiceAccountCreds();
-    const SHEET_ID = getSheetId();
-    
-    if (!creds || !SHEET_ID) {
-      console.error('❌ Missing credentials or sheet ID');
-      return;
-    }
-
-    const doc = new GoogleSpreadsheet(SHEET_ID);
-    await doc.useServiceAccountAuth(creds);
-    await doc.loadInfo();
-
-    // Get the tracking log sheet
-    let sheet;
-    try {
-      sheet = doc.sheetsByTitle[SHEET_NAME];
-      if (!sheet) {
-        // Try case-insensitive match as fallback
-        const sheetTitles = Object.keys(doc.sheetsByTitle);
-        const matchingTitle = sheetTitles.find(
-          title => title.toLowerCase() === SHEET_NAME.toLowerCase()
-        );
-        
-        if (matchingTitle) {
-          sheet = doc.sheetsByTitle[matchingTitle];
-          console.log(`Found sheet with slightly different name: "${matchingTitle}"`);
-        } else {
-          console.error(`❌ Sheet "${SHEET_NAME}" not found. Available sheets:`, sheetTitles);
-          return;
-        }
-      }
-    } catch (err) {
-      console.error(`❌ Error accessing sheet "${SHEET_NAME}":`, err.message);
-      return;
-    }
-
-    // Format date to string if it's a Date object
-    const sentTimeStr = sentTime instanceof Date ? sentTime.toISOString() : sentTime.toString();
-
-    await sheet.addRow({
-      'Company Name': company,
-      'Email ID': email,
-      'Subject': subject,
-      'Email Type': type,
-      'Sent Time': sentTimeStr,
-      'Total Opens': '0',
-      'Last Seen Time': '',
-      'Seen 1': '', 'Seen 2': '', 'Seen 3': '', 'Seen 4': '', 'Seen 5': '',
-      'Seen 6': '', 'Seen 7': '', 'Seen 8': '', 'Seen 9': '', 'Seen 10': '',
-      'Total PDF Views': '0', 'Last PDF View Time': '',
-      'Total Cal Clicks': '0', 'Last Cal Click Time': '',
-      'Total Web Clicks': '0', 'Last Web Click Time': '',
-      'Total Portfolio Link Clicks': '0', 'Last Portfolio Link Time': '',
-      'CID': cid
-    });
-
-    console.log(`✅ Row inserted for CID: ${cid}`);
-  } catch (err) {
-    console.error('❌ Error in insertTrackingRow:', err.message);
-    console.error(err.stack);
-  }
-}
-
-module.exports = {
-  logOpenByCid,
-  insertTrackingRow
-};
