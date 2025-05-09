@@ -1,3 +1,50 @@
+const express = require('express');
+const { logOpenByCid, insertTrackingRow } = require('./google');
+
+// Initialize Express app first before using it
+const app = express();
+
+// Read environment variables with validation
+const port = process.env.PORT || 3000;
+
+// Validate critical environment variables on startup
+if (!process.env.GOOGLE_SERVICE_ACCOUNT) {
+  console.error('❌ CRITICAL ERROR: GOOGLE_SERVICE_ACCOUNT environment variable is missing');
+  // Continue execution to allow health checks to pass
+}
+
+if (!process.env.GOOGLE_SHEET_ID) {
+  console.error('❌ CRITICAL ERROR: GOOGLE_SHEET_ID environment variable is missing');
+  // Continue execution to allow health checks to pass
+}
+
+// Add health check endpoint for Railway
+app.get('/health', (req, res) => {
+  res.status(200).send('OK');
+});
+
+// Handle process signals properly
+process.on('SIGTERM', () => {
+  console.log('🛑 SIGTERM received, shutting down gracefully');
+  // Allow some time for pending requests to complete
+  setTimeout(() => {
+    process.exit(0);
+  }, 1000);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('❌ Uncaught exception:', err);
+  // Don't exit to allow the server to continue running
+});
+
+// ✅ Base64 websafe decoder to exactly match Apps Script encoding
+function decodeBase64UrlSafe(str) {
+  str = str.replace(/-/g, '+').replace(/_/g, '/');
+  while (str.length % 4 !== 0) str += '=';
+  const buffer = Buffer.from(str, 'base64');
+  return buffer.toString('utf-8');
+}
+
 app.get('/open', async (req, res) => {
   try {
     const encodedCid = req.query.cid;
@@ -9,7 +56,7 @@ app.get('/open', async (req, res) => {
     // Log the raw CID for debugging
     console.log('📨 Received raw CID:', encodedCid);
 
-    // Add cache-control headers to prevent caching and reduce duplicate tracking
+    // Add cache-control headers to prevent caching
     res.set({
       'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
       'Pragma': 'no-cache',
@@ -56,4 +103,51 @@ app.get('/open', async (req, res) => {
     res.set('Content-Type', 'image/gif');
     res.send(pixel);
   }
+});
+
+// For testing the connection to Google Sheets
+app.get('/status', async (req, res) => {
+  try {
+    // Check if required environment variables are set
+    if (!process.env.GOOGLE_SERVICE_ACCOUNT) {
+      return res.status(500).json({ 
+        status: 'error', 
+        message: 'GOOGLE_SERVICE_ACCOUNT environment variable is missing' 
+      });
+    }
+
+    if (!process.env.GOOGLE_SHEET_ID) {
+      return res.status(500).json({ 
+        status: 'error', 
+        message: 'GOOGLE_SHEET_ID environment variable is missing' 
+      });
+    }
+
+    // Check if we can parse service account JSON
+    try {
+      JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
+    } catch (err) {
+      return res.status(500).json({ 
+        status: 'error', 
+        message: 'GOOGLE_SERVICE_ACCOUNT is not valid JSON' 
+      });
+    }
+
+    res.status(200).json({ 
+      status: 'ok', 
+      message: 'Environment variables look good', 
+      sheetId: process.env.GOOGLE_SHEET_ID,
+      serviceAccountPresent: true
+    });
+  } catch (err) {
+    res.status(500).json({ 
+      status: 'error', 
+      message: err.message 
+    });
+  }
+});
+
+// Start the server
+app.listen(port, () => {
+  console.log(`🚀 Server running on port ${port}`);
 });

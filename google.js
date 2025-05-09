@@ -21,7 +21,7 @@ async function logOpenByCid(encodedCid) {
     if (decodedCid.includes('||')) {
       parts = decodedCid.split('||');
     } else {
-      parts = decodedCid.split('|');
+      parts = decodedCid.split('|'); 
     }
     
     const [company, email, subject, type, sentTime] = parts;
